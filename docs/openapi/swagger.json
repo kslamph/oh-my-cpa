@@ -21843,6 +21843,38 @@
         }
       }
     },
+    "quota.PluginResetCard": {
+      "type": "object",
+      "properties": {
+        "expires_at_ms": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "PluginResetCardFiveHour or PluginResetCardWeek",
+          "type": "string"
+        }
+      }
+    },
+    "quota.PluginResetCards": {
+      "type": "object",
+      "properties": {
+        "cards": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/quota.PluginResetCard"
+          }
+        },
+        "five_hour_count": {
+          "type": "integer"
+        },
+        "week_count": {
+          "type": "integer"
+        }
+      }
+    },
     "quota.QuotaBalance": {
       "type": "object",
       "properties": {
@@ -22021,6 +22053,14 @@
         "plan_type": {
           "description": "e.g. \"pro\", \"plus\", \"ultra\", \"team\", \"free\"",
           "type": "string"
+        },
+        "reset_cards": {
+          "description": "ResetCards are the reset cards a quota plugin reports (display-only: spending one\nis the plugin's own action). Nil when the plugin reports none.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/quota.PluginResetCards"
+            }
+          ]
         },
         "subscription_active": {
           "type": "boolean"
