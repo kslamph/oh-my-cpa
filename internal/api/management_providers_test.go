@@ -21,8 +21,10 @@ import (
 )
 
 type providerFakeServerState struct {
-	mu              sync.Mutex
-	clientKeys      []string
+	mu         sync.Mutex
+	clientKeys []string
+	// modelAccess is CPA's `access.api-key-model-access` section, as the fixture stores it.
+	modelAccess     map[string]any
 	oaiProviders    []map[string]any
 	codexProviders  []map[string]any
 	claudeProviders []map[string]any
@@ -217,8 +219,20 @@ func newProviderTestFixture(t *testing.T) providerTestFixture {
 		path := request.URL.Path
 
 		switch {
+		case path == "/v8/management/config/access/api-key-model-access" && request.Method == http.MethodPut:
+			var next map[string]any
+			_ = json.NewDecoder(request.Body).Decode(&next)
+			state.modelAccess = next
+			_, _ = writer.Write([]byte(`{"status":"ok"}`))
+		case path == "/v8/management/config/access/api-key-model-access" && request.Method == http.MethodDelete:
+			state.modelAccess = nil
+			_, _ = writer.Write([]byte(`{"status":"ok"}`))
 		case path == "/v8/management/config" && request.Method == http.MethodGet:
-			_ = json.NewEncoder(writer).Encode(map[string]any{"access": map[string]any{"api-keys": state.clientKeys}})
+			access := map[string]any{"api-keys": state.clientKeys}
+			if len(state.modelAccess) > 0 {
+				access["api-key-model-access"] = state.modelAccess
+			}
+			_ = json.NewEncoder(writer).Encode(map[string]any{"access": access})
 		case path == "/v8/management/config" && request.Method == http.MethodPatch:
 			var merge struct {
 				Access struct {

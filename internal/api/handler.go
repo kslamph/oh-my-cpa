@@ -354,6 +354,7 @@ func (h *Handler) routes() chi.Router {
 				v1.Post("/management/api-keys", h.createClientAPIKey)
 				v1.Put("/management/api-keys/{index}", h.updateClientAPIKey)
 				v1.Delete("/management/api-keys/{index}", h.deleteClientAPIKey)
+				v1.Put("/management/api-keys/{index}/model-access", h.updateClientAPIKeyModelAccess)
 				// Key aliases are Oh My CPA's own metadata keyed by the usage
 				// fingerprint, so they are separate from the CPA config writes above.
 				v1.Get("/management/client-key-aliases", h.listClientKeyAliases)

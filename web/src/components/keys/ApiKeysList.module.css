@@ -65,6 +65,12 @@
   color: var(--meta);
 }
 
+.access {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
 /* ── phone card ─────────────────────────────────────────────────────────────── */
 /* On a phone the keys are one framed table, as an OAuth provider's credentials are: a header strip
    on the surface, then the cards split by hairlines. */
@@ -120,6 +126,8 @@
 
 .phone-card-state {
   display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
   margin-top: -2px;
 }
 

@@ -48,6 +48,108 @@ func (c *Client) UpdateClientAPIKeys(ctx context.Context, keys []string) error {
 	return c.ApplyConfigChanges(WithBackupReason(ctx, BackupReasonClientKeys), []ConfigChange{{Path: CLIENT_KEYS_PATH, Value: keys}})
 }
 
+// CLIENT_KEY_MODEL_ACCESS_PATH is where a patched CPA keeps its per-client-key
+// model restrictions (`access.api-key-model-access`): a mapping from a client
+// key to the model patterns it may or may not use.
+var CLIENT_KEY_MODEL_ACCESS_PATH = []string{"access", "api-key-model-access"}
+
+// ClientKeyModelAccess is one client key's model restriction. CPA owns the
+// matching rules (case-insensitive `*`/`?` patterns, a denied match always wins,
+// a key without an entry is unrestricted); the console only edits the lists.
+type ClientKeyModelAccess struct {
+	Allowed []string `json:"allowed-models,omitempty"`
+	Denied  []string `json:"denied-models,omitempty"`
+}
+
+// IsZero reports an entry that restricts nothing, which CPA treats the same as
+// no entry at all.
+func (a ClientKeyModelAccess) IsZero() bool {
+	return len(a.Allowed) == 0 && len(a.Denied) == 0
+}
+
+// ClientKeyAccess reads the client keys and their model restrictions from one
+// view, so the two cannot disagree. A CPA without the restriction feature has no
+// such section, which reads as an empty map.
+func (c *Client) ClientKeyAccess(ctx context.Context) ([]string, map[string]ClientKeyModelAccess, error) {
+	view, _, err := c.ConfigView(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	value, _ := ValueAt(view, CLIENT_KEYS_PATH)
+	items, _ := value.([]any)
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		if key, ok := item.(string); ok {
+			keys = append(keys, key)
+		}
+	}
+	return keys, decodeClientKeyModelAccess(view), nil
+}
+
+func decodeClientKeyModelAccess(view map[string]any) map[string]ClientKeyModelAccess {
+	access := map[string]ClientKeyModelAccess{}
+	value, _ := ValueAt(view, CLIENT_KEY_MODEL_ACCESS_PATH)
+	entries, _ := value.(map[string]any)
+	for key, raw := range entries {
+		entry, _ := raw.(map[string]any)
+		decoded := ClientKeyModelAccess{
+			Allowed: stringList(entry["allowed-models"]),
+			Denied:  stringList(entry["denied-models"]),
+		}
+		if !decoded.IsZero() {
+			access[key] = decoded
+		}
+	}
+	return access
+}
+
+func stringList(value any) []string {
+	items, _ := value.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			out = append(out, text)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// UpdateClientKeyAccess writes the client keys and, when writeAccess is set, the
+// whole restriction mapping in the same change set. The mapping is replaced as a
+// value (its keys are secrets, not path segments); an empty one removes the
+// section so the file does not keep an empty `api-key-model-access`.
+func (c *Client) UpdateClientKeyAccess(ctx context.Context, keys []string, access map[string]ClientKeyModelAccess, writeAccess bool) error {
+	if keys == nil {
+		keys = []string{}
+	}
+	changes := []ConfigChange{{Path: CLIENT_KEYS_PATH, Value: keys}}
+	if writeAccess {
+		value := map[string]any{}
+		for key, entry := range access {
+			if entry.IsZero() {
+				continue
+			}
+			fields := map[string]any{}
+			if len(entry.Allowed) > 0 {
+				fields["allowed-models"] = entry.Allowed
+			}
+			if len(entry.Denied) > 0 {
+				fields["denied-models"] = entry.Denied
+			}
+			value[key] = fields
+		}
+		if len(value) == 0 {
+			changes = append(changes, ConfigChange{Path: CLIENT_KEY_MODEL_ACCESS_PATH, Remove: true})
+		} else {
+			changes = append(changes, ConfigChange{Path: CLIENT_KEY_MODEL_ACCESS_PATH, Value: value})
+		}
+	}
+	return c.ApplyConfigChanges(WithBackupReason(ctx, BackupReasonClientKeys), changes)
+}
+
 type OpenAICompatibilityResponse struct {
 	Entries []OpenAICompatibility `json:"openai-compatibility"`
 }

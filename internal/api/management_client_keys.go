@@ -7,8 +7,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/oh-my-cpa/oh-my-cpa/internal/cpa/management"
 	"github.com/oh-my-cpa/oh-my-cpa/internal/repository"
 	"github.com/oh-my-cpa/oh-my-cpa/internal/security"
 	"github.com/oh-my-cpa/oh-my-cpa/internal/statecoord"
@@ -38,6 +40,11 @@ type ClientAPIKeyItemDTO struct {
 	Alias string `json:"alias,omitempty"`
 	// AliasVersion is the version a rename must cite; zero means no alias exists.
 	AliasVersion int64 `json:"alias_version"`
+	// AllowedModels and DeniedModels are the key's model patterns in CPA's
+	// `access.api-key-model-access`. Both empty means the key is unrestricted. CPA owns the
+	// matching rules; a gateway without the feature simply never reports any.
+	AllowedModels []string `json:"allowed_models,omitempty"`
+	DeniedModels  []string `json:"denied_models,omitempty"`
 }
 
 var (
@@ -46,7 +53,7 @@ var (
 	errClientKeyStaleIndex  = errors.New("the key at this position changed; reload and try again")
 )
 
-func (h *Handler) projectClientAPIKeyItems(keys []string, aliases map[string]repository.ClientKeyAlias, includeKeys bool) []ClientAPIKeyItemDTO {
+func (h *Handler) projectClientAPIKeyItems(keys []string, access map[string]management.ClientKeyModelAccess, aliases map[string]repository.ClientKeyAlias, includeKeys bool) []ClientAPIKeyItemDTO {
 	items := make([]ClientAPIKeyItemDTO, 0, len(keys))
 	for i, key := range keys {
 		trimmed := strings.TrimSpace(key)
@@ -62,6 +69,10 @@ func (h *Handler) projectClientAPIKeyItems(keys []string, aliases map[string]rep
 			Key:         displayKey,
 			Fingerprint: fingerprint,
 			Length:      len(trimmed),
+		}
+		if entry, ok := access[key]; ok {
+			item.AllowedModels = slices.Clone(entry.Allowed)
+			item.DeniedModels = slices.Clone(entry.Denied)
 		}
 		// The usage identity is derived with the purpose the ingestion path uses,
 		// which is what makes a name attach to the requests this key served. It is
@@ -130,21 +141,27 @@ func (h *Handler) listClientAPIKeys(writer http.ResponseWriter, request *http.Re
 
 	var (
 		keys    []string
+		access  map[string]management.ClientKeyModelAccess
 		version uint64
 		err     error
 	)
 	if h.stateCoord != nil {
-		env, coordErr := statecoord.ProjectTyped(request.Context(), h.stateCoord, func(state projectedConfigState, _ uint64) ([]string, error) {
-			return slices.Clone(state.ClientKeys), nil
+		type clientKeySnapshot struct {
+			keys   []string
+			access map[string]management.ClientKeyModelAccess
+		}
+		env, coordErr := statecoord.ProjectTyped(request.Context(), h.stateCoord, func(state projectedConfigState, _ uint64) (clientKeySnapshot, error) {
+			return clientKeySnapshot{slices.Clone(state.ClientKeys), cloneClientKeyModelAccess(state.ClientKeyModelAccess)}, nil
 		})
 		if coordErr == nil {
-			keys = env.Data
+			keys = env.Data.keys
+			access = env.Data.access
 			version = env.Version
 		} else {
 			err = coordErr
 		}
 	} else {
-		keys, err = client.ClientAPIKeys(request.Context())
+		keys, access, err = client.ClientKeyAccess(request.Context())
 	}
 	if err != nil {
 		writeCPAFacadeError(writer, err)
@@ -158,7 +175,7 @@ func (h *Handler) listClientAPIKeys(writer http.ResponseWriter, request *http.Re
 		aliases = map[string]repository.ClientKeyAlias{}
 	}
 
-	items := h.projectClientAPIKeyItems(keys, aliases, includeKeys)
+	items := h.projectClientAPIKeyItems(keys, access, aliases, includeKeys)
 
 	if includeKeys {
 		// The reveal is the audit boundary: a masked response carries no credential,
@@ -398,6 +415,7 @@ func (h *Handler) updateClientAPIKey(writer http.ResponseWriter, request *http.R
 					return errClientKeyDuplicate
 				}
 			}
+			moveClientKeyModelAccess(state, state.ClientKeys[index], updatedKey)
 			state.ClientKeys[index] = updatedKey
 			return nil
 		})
@@ -433,7 +451,7 @@ func (h *Handler) updateClientAPIKey(writer http.ResponseWriter, request *http.R
 	}
 	defer h.providerWrites.release()
 
-	currentKeys, err := client.ClientAPIKeys(request.Context())
+	currentKeys, currentAccess, err := client.ClientKeyAccess(request.Context())
 	if err != nil {
 		writeCPAFacadeError(writer, err)
 		return
@@ -458,7 +476,8 @@ func (h *Handler) updateClientAPIKey(writer http.ResponseWriter, request *http.R
 	}
 	nextKeys := slices.Clone(currentKeys)
 	nextKeys[index] = updatedKey
-	if err := client.UpdateClientAPIKeys(request.Context(), nextKeys); err != nil {
+	carried := moveModelAccessEntry(currentAccess, currentKeys[index], updatedKey)
+	if err := client.UpdateClientKeyAccess(request.Context(), nextKeys, currentAccess, carried); err != nil {
 		_ = h.recordAudit(request, "api_key.update", "client_api_key", targetLabel, "failure", map[string]any{"error": err.Error()})
 		writeCPAFacadeError(writer, err)
 		return
@@ -546,6 +565,7 @@ func (h *Handler) deleteClientAPIKey(writer http.ResponseWriter, request *http.R
 			if expectedFingerprint != "" && security.FingerprintOrRedacted(h.cipher, "client-key", strings.TrimSpace(state.ClientKeys[index])) != expectedFingerprint {
 				return errClientKeyStaleIndex
 			}
+			moveClientKeyModelAccess(state, state.ClientKeys[index], "")
 			state.ClientKeys = append(state.ClientKeys[:index:index], state.ClientKeys[index+1:]...)
 			return nil
 		})
@@ -610,4 +630,204 @@ func (h *Handler) deleteClientAPIKey(writer http.ResponseWriter, request *http.R
 		Status:  "ok",
 		Deleted: index,
 	})
+}
+
+// moveClientKeyModelAccess carries a key's restriction to its replacement, or drops it when
+// the key is deleted (to == ""), and marks the mapping for writing. A key without an entry
+// leaves the mapping and the flag alone, so editing an unrestricted key never touches
+// `access.api-key-model-access`.
+func moveClientKeyModelAccess(state *projectedConfigState, from, to string) {
+	if moveModelAccessEntry(state.ClientKeyModelAccess, from, to) {
+		state.ClientKeyAccessDirty = true
+	}
+}
+
+// moveModelAccessEntry renames or removes one entry in place and reports whether the mapping
+// changed.
+func moveModelAccessEntry(access map[string]management.ClientKeyModelAccess, from, to string) bool {
+	entry, ok := access[from]
+	if !ok || from == to {
+		return false
+	}
+	delete(access, from)
+	if to != "" {
+		access[to] = entry
+	}
+	return true
+}
+
+const (
+	maxModelAccessPatterns      = 200
+	maxModelAccessPatternLength = 256
+)
+
+var errModelAccessInvalid = errors.New("invalid model access patterns")
+
+// normalizeModelPatterns trims, drops blanks and removes duplicates while keeping the order
+// the operator wrote. CPA does its own case folding when it matches, so case is preserved.
+func normalizeModelPatterns(patterns []string) ([]string, error) {
+	out := make([]string, 0, len(patterns))
+	seen := make(map[string]struct{}, len(patterns))
+	for _, raw := range patterns {
+		pattern := strings.TrimSpace(raw)
+		if pattern == "" {
+			continue
+		}
+		if len(pattern) > maxModelAccessPatternLength || strings.ContainsFunc(pattern, unicode.IsControl) {
+			return nil, errModelAccessInvalid
+		}
+		if _, dup := seen[pattern]; dup {
+			continue
+		}
+		seen[pattern] = struct{}{}
+		out = append(out, pattern)
+	}
+	if len(out) > maxModelAccessPatterns {
+		return nil, errModelAccessInvalid
+	}
+	return out, nil
+}
+
+type updateClientKeyModelAccessRequest struct {
+	ExpectedFingerprint string   `json:"expected_fingerprint,omitempty"`
+	AllowedModels       []string `json:"allowed_models"`
+	DeniedModels        []string `json:"denied_models"`
+}
+
+// @Summary Set a client API key's model access
+// @Description Replace the allowed/denied model patterns of the caller API key at the given positional index. Both lists empty removes the restriction. Needs a CPA that supports access.api-key-model-access; CPA owns pattern matching.
+// @Tags ClientKeys
+// @Accept json
+// @Produce json
+// @Security CookieAuth
+// @Param index path integer true "Positional key index"
+// @Param body body updateClientKeyModelAccessRequest true "Model patterns"
+// @Success 200 {object} ClientAPIKeyModelAccessResponseDTO
+// @Failure 400 {object} ErrorResponseDTO
+// @Failure 401 {object} ErrorResponseDTO
+// @Failure 404 {object} ErrorResponseDTO
+// @Failure 409 {object} ErrorResponseDTO
+// @Failure 500 {object} ErrorResponseDTO
+// @Failure 502 {object} ErrorResponseDTO
+// @Failure 503 {object} ErrorResponseDTO
+// @Router /v1/management/api-keys/{index}/model-access [put]
+func (h *Handler) updateClientAPIKeyModelAccess(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Cache-Control", "no-store")
+	index, err := strconv.Atoi(chi.URLParam(request, "index"))
+	if err != nil || index < 0 {
+		writeError(writer, http.StatusBadRequest, "invalid key index")
+		return
+	}
+	var req updateClientKeyModelAccessRequest
+	if err := decodeManagementJSON(writer, request, 64*1024, &req); err != nil {
+		return
+	}
+	allowed, allowedErr := normalizeModelPatterns(req.AllowedModels)
+	denied, deniedErr := normalizeModelPatterns(req.DeniedModels)
+	if allowedErr != nil || deniedErr != nil {
+		writeError(writer, http.StatusBadRequest, fmt.Sprintf("model patterns must be at most %d entries of %d characters without control characters", maxModelAccessPatterns, maxModelAccessPatternLength))
+		return
+	}
+	next := management.ClientKeyModelAccess{Allowed: allowed, Denied: denied}
+	expectedFingerprint := strings.TrimSpace(req.ExpectedFingerprint)
+	targetLabel := fmt.Sprintf("index:%d", index)
+
+	client, ok := h.managementClientOrError(writer, request)
+	if !ok {
+		return
+	}
+	details := map[string]any{"allowed_count": len(allowed), "denied_count": len(denied)}
+	respond := func(version uint64) {
+		setStateVersionHeader(writer, version)
+		writeJSON(writer, http.StatusOK, ClientAPIKeyModelAccessResponseDTO{
+			Status:        "ok",
+			Index:         index,
+			AllowedModels: allowed,
+			DeniedModels:  denied,
+			Version:       version,
+		})
+	}
+	fail := func(err error) {
+		_ = h.recordAudit(request, "api_key.model_access", "client_api_key", targetLabel, "failure", map[string]any{"error": err.Error()})
+		switch {
+		case errors.Is(err, errClientKeyOutOfBounds):
+			writeError(writer, http.StatusNotFound, "key index out of bounds")
+		case errors.Is(err, errClientKeyStaleIndex):
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": err.Error(), "code": "resource_conflict"})
+		default:
+			writeProviderWriteError(writer, err)
+		}
+	}
+	if auditErr := h.recordAudit(request, "api_key.model_access", "client_api_key", targetLabel, "attempt", details); auditErr != nil {
+		writeError(writer, http.StatusInternalServerError, "audit failure; model access update aborted")
+		return
+	}
+
+	if h.stateCoord != nil {
+		version, mutErr := h.mutateCoordinatorWithAudit(request, stateDomainClientKeys, "api_key.model_access", "client_api_key", targetLabel, details, func(state *projectedConfigState) error {
+			if index >= len(state.ClientKeys) {
+				return errClientKeyOutOfBounds
+			}
+			key := state.ClientKeys[index]
+			if expectedFingerprint != "" && security.FingerprintOrRedacted(h.cipher, "client-key", strings.TrimSpace(key)) != expectedFingerprint {
+				return errClientKeyStaleIndex
+			}
+			if state.ClientKeyModelAccess == nil {
+				state.ClientKeyModelAccess = map[string]management.ClientKeyModelAccess{}
+			}
+			if next.IsZero() {
+				delete(state.ClientKeyModelAccess, key)
+			} else {
+				state.ClientKeyModelAccess[key] = next
+			}
+			state.ClientKeyAccessDirty = true
+			return nil
+		})
+		if mutErr != nil {
+			fail(mutErr)
+			return
+		}
+		respond(version)
+		return
+	}
+
+	if err := h.providerWrites.acquire(request.Context()); err != nil {
+		fail(err)
+		return
+	}
+	defer h.providerWrites.release()
+	keys, access, err := client.ClientKeyAccess(request.Context())
+	if err != nil {
+		fail(err)
+		return
+	}
+	if index >= len(keys) {
+		fail(errClientKeyOutOfBounds)
+		return
+	}
+	key := keys[index]
+	if expectedFingerprint != "" && security.FingerprintOrRedacted(h.cipher, "client-key", strings.TrimSpace(key)) != expectedFingerprint {
+		fail(errClientKeyStaleIndex)
+		return
+	}
+	if next.IsZero() {
+		delete(access, key)
+	} else {
+		access[key] = next
+	}
+	if err := client.UpdateClientKeyAccess(request.Context(), keys, access, true); err != nil {
+		fail(err)
+		return
+	}
+	_ = h.recordAudit(request, "api_key.model_access", "client_api_key", targetLabel, "success", details)
+	respond(0)
+}
+
+// ClientAPIKeyModelAccessResponseDTO echoes the normalized patterns that were stored.
+type ClientAPIKeyModelAccessResponseDTO struct {
+	Status        string   `json:"status"`
+	Index         int      `json:"index"`
+	AllowedModels []string `json:"allowed_models"`
+	DeniedModels  []string `json:"denied_models"`
+	Version       uint64   `json:"version,omitempty"`
 }

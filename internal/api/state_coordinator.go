@@ -55,18 +55,23 @@ type pendingScalarEntry struct {
 // projectedConfigState holds the in-memory hot projection of CPA configuration slices.
 // Instances stored inside statecoord.Coordinator are never mutated in place outside Coordinator.Mutate.
 type projectedConfigState struct {
-	Scalars                  management.ConfigScalarsDTO                                     `json:"scalars"`
-	PendingScalars           map[string]pendingScalarEntry                                   `json:"pending_scalars,omitempty"`
-	ScalarSeq                uint64                                                          `json:"scalar_seq"`
-	ViewYAML                 string                                                          `json:"view_yaml"`
-	SafeYAML                 string                                                          `json:"safe_yaml"`
-	RuntimeRevision          string                                                          `json:"-"`
-	StoredETag               string                                                          `json:"-"`
-	CommittedETag            string                                                          `json:"-"`
-	IsBaselineUnknown        bool                                                            `json:"-"`
-	Revision                 string                                                          `json:"revision"`
-	StoredLayout             string                                                          `json:"stored_layout"`
-	ClientKeys               []string                                                        `json:"client_keys"`
+	Scalars           management.ConfigScalarsDTO   `json:"scalars"`
+	PendingScalars    map[string]pendingScalarEntry `json:"pending_scalars,omitempty"`
+	ScalarSeq         uint64                        `json:"scalar_seq"`
+	ViewYAML          string                        `json:"view_yaml"`
+	SafeYAML          string                        `json:"safe_yaml"`
+	RuntimeRevision   string                        `json:"-"`
+	StoredETag        string                        `json:"-"`
+	CommittedETag     string                        `json:"-"`
+	IsBaselineUnknown bool                          `json:"-"`
+	Revision          string                        `json:"revision"`
+	StoredLayout      string                        `json:"stored_layout"`
+	ClientKeys        []string                      `json:"client_keys"`
+	// ClientKeyModelAccess is each client key's model restriction, keyed by the key text (a
+	// secret, so it never leaves the process in this projection). ClientKeyAccessDirty marks
+	// that the next client-keys flush must write the mapping as well as the key list.
+	ClientKeyModelAccess     map[string]management.ClientKeyModelAccess                      `json:"-"`
+	ClientKeyAccessDirty     bool                                                            `json:"-"`
 	ConfigFamilies           map[management.ConfigKeyFamily][]management.ConfigAPIKey        `json:"config_families"`
 	RuntimeOnlyFam           map[management.ConfigKeyFamily]bool                             `json:"runtime_only_fam,omitempty"`
 	FailedProviderFamilies   map[management.ConfigKeyFamily]bool                             `json:"failed_provider_families,omitempty"`
@@ -205,6 +210,8 @@ func cloneProjectedConfigState(src projectedConfigState) projectedConfigState {
 		IsBaselineUnknown:        src.IsBaselineUnknown,
 		StoredLayout:             src.StoredLayout,
 		ClientKeys:               slices.Clone(src.ClientKeys),
+		ClientKeyModelAccess:     cloneClientKeyModelAccess(src.ClientKeyModelAccess),
+		ClientKeyAccessDirty:     src.ClientKeyAccessDirty,
 		ConfigFamilies:           families,
 		RuntimeOnlyFam:           maps.Clone(src.RuntimeOnlyFam),
 		FailedProviderFamilies:   maps.Clone(src.FailedProviderFamilies),
@@ -530,7 +537,7 @@ func (h *Handler) registerCoordinatorDomains(coord *statecoord.Coordinator[proje
 				return err
 			}
 			h.invalidateClientKeyCatalog()
-			return client.UpdateClientAPIKeys(ctx, snapshot.ClientKeys)
+			return client.UpdateClientKeyAccess(ctx, snapshot.ClientKeys, snapshot.ClientKeyModelAccess, snapshot.ClientKeyAccessDirty)
 		},
 	})
 
@@ -778,6 +785,16 @@ func (h *Handler) refreshCoordinatorBaseline(ctx context.Context) {
 	}
 }
 
+// cloneClientKeyModelAccess copies the restriction mapping and the lists inside it, so an
+// optimistic edit never aliases the snapshot a flush is writing.
+func cloneClientKeyModelAccess(src map[string]management.ClientKeyModelAccess) map[string]management.ClientKeyModelAccess {
+	out := make(map[string]management.ClientKeyModelAccess, len(src))
+	for key, entry := range src {
+		out[key] = management.ClientKeyModelAccess{Allowed: slices.Clone(entry.Allowed), Denied: slices.Clone(entry.Denied)}
+	}
+	return out
+}
+
 // rebaseProjectedConfigState retains only pending domains over a full persisted
 // baseline. Revision and YAML always describe that baseline, not optimistic edits.
 func rebaseProjectedConfigState(fresh, pending projectedConfigState, dirty []statecoord.DomainKey) projectedConfigState {
@@ -794,6 +811,8 @@ func rebaseProjectedConfigState(fresh, pending projectedConfigState, dirty []sta
 			}
 		case domain == stateDomainClientKeys:
 			fresh.ClientKeys = slices.Clone(pending.ClientKeys)
+			fresh.ClientKeyModelAccess = cloneClientKeyModelAccess(pending.ClientKeyModelAccess)
+			fresh.ClientKeyAccessDirty = pending.ClientKeyAccessDirty
 		case domain == stateDomainOpenAICompat:
 			fresh.PendingOpenAIToggles = maps.Clone(pending.PendingOpenAIToggles)
 			for idx := range fresh.OpenAICompat {
@@ -874,6 +893,7 @@ func (h *Handler) loadUpstreamProjectedState(ctx context.Context) (projectedConf
 		viewYAML                 = baselineYAML
 		storedLayout             = storedConfigLayoutUnknown
 		clientKeys               []string
+		clientKeyAccess          map[string]management.ClientKeyModelAccess
 		keysErr                  error
 		openAICompat             []management.OpenAICompatibility
 		openAIRuntime            bool
@@ -899,7 +919,7 @@ func (h *Handler) loadUpstreamProjectedState(ctx context.Context) (projectedConf
 	})
 
 	wg.Go(func() {
-		clientKeys, keysErr = client.ClientAPIKeys(ctx)
+		clientKeys, clientKeyAccess, keysErr = client.ClientKeyAccess(ctx)
 	})
 
 	wg.Go(func() {
@@ -1051,6 +1071,7 @@ func (h *Handler) loadUpstreamProjectedState(ctx context.Context) (projectedConf
 		StoredETag:               meta.Header.Get("ETag"),
 		StoredLayout:             storedLayout,
 		ClientKeys:               clientKeys,
+		ClientKeyModelAccess:     clientKeyAccess,
 		ConfigFamilies:           configFamilies,
 		RuntimeOnlyFam:           runtimeOnlyFam,
 		FailedProviderFamilies:   failedFamilies,

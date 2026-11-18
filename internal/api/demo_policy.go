@@ -370,6 +370,7 @@ var demoPolicy = []demoPolicyRule{
 	{http.MethodPost, "/api/v1/management/api-keys", demoRefuse, "changing gateway key material is disabled"},
 	{http.MethodPut, "/api/v1/management/api-keys/{index}", demoRefuse, "changing gateway key material is disabled"},
 	{http.MethodDelete, "/api/v1/management/api-keys/{index}", demoRefuse, "changing gateway key material is disabled"},
+	{http.MethodPut, "/api/v1/management/api-keys/{index}/model-access", demoRefuse, "changing gateway key access is disabled"},
 	{http.MethodPost, "/api/v1/management/providers", demoRefuse, "changing provider configuration is disabled"},
 	{http.MethodPut, "/api/v1/management/providers/{id}", demoRefuse, "changing provider configuration is disabled"},
 	{http.MethodDelete, "/api/v1/management/providers/{id}", demoRefuse, "changing provider configuration is disabled"},

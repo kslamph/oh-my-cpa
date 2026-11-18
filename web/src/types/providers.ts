@@ -18,6 +18,9 @@ export interface ClientAPIKeyItem {
   alias?: string;
   /** Version a rename must cite; 0 when no alias exists. */
   alias_version: number;
+  /** CPA's `access.api-key-model-access` patterns for this key. Both absent: unrestricted. */
+  allowed_models?: string[];
+  denied_models?: string[];
 }
 
 /** One key's observed traffic within the queried window. */

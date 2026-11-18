@@ -137,6 +137,30 @@ export const ApiKeysList: React.FC<ApiKeysListProps> = ({
       : <StatusLabel tone="neutral">{t('keys.stat_idle')}</StatusLabel>;
   };
 
+  // Unrestricted is the common state and reads as plain text; a restricted key names how many
+  // patterns it carries, and the tooltip lists them.
+  const accessCell = (record: ApiKeyRecord) => {
+    if (record.allowedModels.length === 0 && record.deniedModels.length === 0) {
+      return <span className={styles['muted']}>{t('keys.access_all')}</span>;
+    }
+    const detail = [
+      ...record.allowedModels.map((pattern) => `+ ${pattern}`),
+      ...record.deniedModels.map((pattern) => `− ${pattern}`),
+    ].join('\n');
+    return (
+      <Tooltip title={<span style={{ whiteSpace: 'pre-line' }}>{detail}</span>}>
+        <span className={styles['access']}>
+          {record.allowedModels.length > 0 && (
+            <StatusLabel tone="success">{t('keys.access_allowed_count', { n: record.allowedModels.length })}</StatusLabel>
+          )}
+          {record.deniedModels.length > 0 && (
+            <StatusLabel tone="danger">{t('keys.access_denied_count', { n: record.deniedModels.length })}</StatusLabel>
+          )}
+        </span>
+      </Tooltip>
+    );
+  };
+
   // A key with no stored request has nothing to join yet: in the window it served nothing.
   const trafficOf = (record: ApiKeyRecord) => {
     if (!isUsageKnown) return undefined;
@@ -233,7 +257,7 @@ export const ApiKeysList: React.FC<ApiKeysListProps> = ({
           {nameCell(record)}
           {renderActions(record)}
         </div>
-        <div className={styles['phone-card-state']}>{statusCell(record)}</div>
+        <div className={styles['phone-card-state']}>{statusCell(record)}{accessCell(record)}</div>
         {traffic && (
           <div className={styles['reading']}>
             <span className={styles['reading-name']}>{t('pro.window_24h')}</span>
@@ -278,6 +302,12 @@ export const ApiKeysList: React.FC<ApiKeysListProps> = ({
       key: 'status',
       width: 112,
       render: (_: unknown, record: ApiKeyRecord) => statusCell(record),
+    },
+    {
+      title: t('keys.col_access'),
+      key: 'access',
+      width: 150,
+      render: (_: unknown, record: ApiKeyRecord) => accessCell(record),
     },
     {
       title: t('pro.col_traffic'),

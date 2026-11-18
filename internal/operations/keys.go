@@ -90,7 +90,7 @@ func (s *Service) DeleteKey(ctx context.Context, index int, fingerprint, revisio
 	if err != nil {
 		return err
 	}
-	keys, err := client.ClientAPIKeys(ctx)
+	keys, access, err := client.ClientKeyAccess(ctx)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,11 @@ func (s *Service) DeleteKey(ctx context.Context, index int, fingerprint, revisio
 			return errors.New("resource_conflict")
 		}
 	}
-	if err = client.UpdateClientAPIKeys(ctx, append(keys[:index:index], keys[index+1:]...)); err != nil {
+	// A deleted key's restriction goes with it, so the mapping does not keep an entry for a
+	// secret CPA no longer accepts. A key without an entry leaves the mapping untouched.
+	_, hadAccess := access[keys[index]]
+	delete(access, keys[index])
+	if err = client.UpdateClientKeyAccess(ctx, append(keys[:index:index], keys[index+1:]...), access, hadAccess); err != nil {
 		return configWriteOutcome(err)
 	}
 	return nil

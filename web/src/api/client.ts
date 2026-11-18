@@ -753,6 +753,29 @@ export const api = {
     });
   },
 
+  /**
+   * Replaces one key's allowed/denied model patterns. Both lists empty removes the
+   * restriction. The fingerprint pins the row so a reordered list cannot restrict another key.
+   */
+  async setClientKeyModelAccess(
+    index: number,
+    expectedFingerprint: string,
+    allowedModels: string[],
+    deniedModels: string[],
+  ): Promise<{ status: string; index: number; allowed_models: string[]; denied_models: string[]; version?: number }> {
+    return request<{ status: string; index: number; allowed_models: string[]; denied_models: string[]; version?: number }>(
+      `/management/api-keys/${index}/model-access`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({
+          expected_fingerprint: expectedFingerprint,
+          allowed_models: allowedModels,
+          denied_models: deniedModels,
+        }),
+      },
+    );
+  },
+
   async deleteClientAPIKey(
     index: number,
     expectedFingerprint?: string,

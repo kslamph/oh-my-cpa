@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { Field } from '@/components/ui/field';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { PlusOutlined, SyncOutlined } from '../components/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import dayjs from '../utils/time';
@@ -34,6 +35,15 @@ import { successRateTone } from '../types/usageEventMetrics';
 /** The longest name the alias endpoint accepts. */
 const MAX_ALIAS_LENGTH = 64;
 
+/** One pattern per line, blanks dropped; the server trims and de-duplicates again. */
+function parsePatternLines(text: string): string[] {
+  return text.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+function samePatterns(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((pattern, i) => pattern === b[i]);
+}
+
 /** A fresh gateway key: a recognisable prefix and 128 bits from the platform's CSPRNG. */
 function generateGatewayKey(): string {
   const randomHex = Array.from(crypto.getRandomValues(new Uint8Array(16)))
@@ -52,6 +62,9 @@ interface EditorState {
   originalFingerprint: string;
   /** Last server-confirmed alias when the editor opened (or after a successful save). */
   confirmedAlias: string;
+  /** The model patterns the editor opened with, to tell whether the access fields changed. */
+  confirmedAllowed: readonly string[];
+  confirmedDenied: readonly string[];
 }
 
 const CLOSED_EDITOR: EditorState = {
@@ -60,6 +73,8 @@ const CLOSED_EDITOR: EditorState = {
   originalKey: '',
   originalFingerprint: '',
   confirmedAlias: '',
+  confirmedAllowed: [],
+  confirmedDenied: [],
 };
 
 const USE_TILES: readonly { key: KeyUseFilter; tone: StatusTone; labelKey: MessageKey; hintKey?: MessageKey }[] = [
@@ -117,6 +132,8 @@ export const ApiKeysPage: React.FC = () => {
   const [editor, setEditor] = React.useState<EditorState>(CLOSED_EDITOR);
   const [keyInput, setKeyInput] = React.useState('');
   const [aliasInput, setAliasInput] = React.useState('');
+  const [allowedInput, setAllowedInput] = React.useState('');
+  const [deniedInput, setDeniedInput] = React.useState('');
   const [isKeyVisible, setIsKeyVisible] = React.useState(false);
   const [isSavingEditor, setIsSavingEditor] = React.useState(false);
 
@@ -147,6 +164,8 @@ export const ApiKeysPage: React.FC = () => {
     setEditor(CLOSED_EDITOR);
     setKeyInput('');
     setAliasInput('');
+    setAllowedInput('');
+    setDeniedInput('');
     setIsKeyVisible(false);
   }, []);
 
@@ -159,9 +178,13 @@ export const ApiKeysPage: React.FC = () => {
       originalKey: '',
       originalFingerprint: '',
       confirmedAlias: '',
+      confirmedAllowed: [],
+      confirmedDenied: [],
     });
     setKeyInput(generateGatewayKey());
     setAliasInput('');
+    setAllowedInput('');
+    setDeniedInput('');
     setIsKeyVisible(true);
   }, []);
 
@@ -176,9 +199,13 @@ export const ApiKeysPage: React.FC = () => {
         originalKey: key,
         originalFingerprint: stored?.fingerprint ?? '',
         confirmedAlias: alias,
+        confirmedAllowed: stored?.allowed_models ?? [],
+        confirmedDenied: stored?.denied_models ?? [],
       });
       setKeyInput(key);
       setAliasInput(alias);
+      setAllowedInput((stored?.allowed_models ?? []).join('\n'));
+      setDeniedInput((stored?.denied_models ?? []).join('\n'));
       setIsKeyVisible(false);
     },
     [currentApiKeys, keysQuery.data],
@@ -248,6 +275,30 @@ export const ApiKeysPage: React.FC = () => {
     [keysQuery.data, toast, queryClient, t, invalidateKeyReaders],
   );
 
+  /**
+   * Writes a key's model patterns. The key's position and fingerprint come from the caller so the
+   * server can refuse the write if the list moved under the editor. False leaves the editor open.
+   */
+  const saveModelAccess = React.useCallback(
+    async (index: number, fingerprint: string, allowed: string[], denied: string[]): Promise<boolean> => {
+      try {
+        const saved = await api.setClientKeyModelAccess(index, fingerprint, allowed, denied);
+        setEditor((prev) => ({
+          ...prev,
+          confirmedAllowed: saved.allowed_models,
+          confirmedDenied: saved.denied_models,
+        }));
+        await invalidateKeyReaders();
+        return true;
+      } catch (error) {
+        await invalidateQueriesSilently(queryClient, { queryKey: QUERY_KEYS.clientKeysPrefix });
+        toast.error(describeError(error) || t('keys.access_save_failed'));
+        return false;
+      }
+    },
+    [invalidateKeyReaders, queryClient, toast, t],
+  );
+
   const handleSaveKey = async () => {
     const trimmedKey = keyInput.trim();
     const trimmedAlias = aliasInput.trim();
@@ -264,6 +315,11 @@ export const ApiKeysPage: React.FC = () => {
       return;
     }
 
+    const allowedPatterns = parsePatternLines(allowedInput);
+    const deniedPatterns = parsePatternLines(deniedInput);
+    const accessChanged =
+      !samePatterns(allowedPatterns, editor.confirmedAllowed) || !samePatterns(deniedPatterns, editor.confirmedDenied);
+
     setIsSavingEditor(true);
     try {
       if (editor.index !== null && editor.originalKey === trimmedKey) {
@@ -271,6 +327,17 @@ export const ApiKeysPage: React.FC = () => {
         // moves, so CPA's configuration document is not touched at all.
         if (trimmedAlias !== editor.confirmedAlias) {
           if (!(await saveKeyAlias(trimmedKey, trimmedAlias))) return;
+        }
+        if (accessChanged) {
+          const liveItems = keysQuery.data?.keys ?? [];
+          const liveIndex = liveItems.findIndex((item) => item.fingerprint === editor.originalFingerprint);
+          if (liveIndex < 0 || !editor.originalFingerprint) {
+            toast.warning(t('keys.rename_conflict'));
+            await invalidateQueriesSilently(queryClient, { queryKey: QUERY_KEYS.clientKeysPrefix });
+            return;
+          }
+          if (!(await saveModelAccess(liveIndex, editor.originalFingerprint, allowedPatterns, deniedPatterns))) return;
+          toast.success(t('keys.access_saved'));
         }
         closeEditor();
         return;
@@ -310,6 +377,27 @@ export const ApiKeysPage: React.FC = () => {
         return;
       }
 
+      // The server carries a restriction over to a replaced key, so only a change the operator
+      // made in this editor is written; a new key starts with the patterns typed here.
+      if (accessChanged) {
+        if (!res.fingerprint) {
+          toast.error(t('keys.access_save_failed'));
+          return;
+        }
+        if (!(await saveModelAccess(res.index, res.fingerprint, allowedPatterns, deniedPatterns))) {
+          setEditor({
+            isOpen: true,
+            index: res.index,
+            originalKey: trimmedKey,
+            originalFingerprint: res.fingerprint,
+            confirmedAlias: editor.confirmedAlias,
+            confirmedAllowed: editor.confirmedAllowed,
+            confirmedDenied: editor.confirmedDenied,
+          });
+          return;
+        }
+      }
+
       if (editor.index === null ? Boolean(trimmedAlias) : true) {
         const targetEntry = res.usage_fingerprint
           ? keysQuery.data?.keys?.find((item) => item.usage_fingerprint === res.usage_fingerprint)
@@ -330,6 +418,8 @@ export const ApiKeysPage: React.FC = () => {
               originalKey: trimmedKey,
               originalFingerprint: res.fingerprint ?? '',
               confirmedAlias: confirmedForNewKey,
+              confirmedAllowed: allowedPatterns,
+              confirmedDenied: deniedPatterns,
             });
             return;
           }
@@ -344,6 +434,8 @@ export const ApiKeysPage: React.FC = () => {
               originalKey: trimmedKey,
               originalFingerprint: res.fingerprint ?? '',
               confirmedAlias: confirmedForNewKey,
+              confirmedAllowed: allowedPatterns,
+              confirmedDenied: deniedPatterns,
             });
             return;
           }
@@ -594,6 +686,28 @@ export const ApiKeysPage: React.FC = () => {
           {isValueChanged && (
             <Notice tone="warning" title={t('keys.value_change_warning')} />
           )}
+          <Field label={t('keys.access_allowed_label')} htmlFor="gateway-key-allowed" extra={t('keys.access_hint')}>
+            <Textarea
+              id="gateway-key-allowed"
+              monospace
+              autoSize={{ minRows: 3, maxRows: 10 }}
+              placeholder={'claude-*\ngpt-5-codex'}
+              value={allowedInput}
+              onChange={(e) => setAllowedInput(e.target.value)}
+              spellCheck={false}
+            />
+          </Field>
+          <Field label={t('keys.access_denied_label')} htmlFor="gateway-key-denied">
+            <Textarea
+              id="gateway-key-denied"
+              monospace
+              autoSize={{ minRows: 2, maxRows: 10 }}
+              placeholder="gpt-5.6-*"
+              value={deniedInput}
+              onChange={(e) => setDeniedInput(e.target.value)}
+              spellCheck={false}
+            />
+          </Field>
         </div>
       </AppDrawer>
     </div>

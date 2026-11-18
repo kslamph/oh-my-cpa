@@ -16,6 +16,9 @@ export interface ApiKeyRecord {
   usageFingerprint?: string;
   alias?: string;
   aliasVersion: number;
+  /** The key's model patterns; both empty means unrestricted. */
+  allowedModels: readonly string[];
+  deniedModels: readonly string[];
   usage?: ClientKeyUsageItem;
 }
 
@@ -43,6 +46,8 @@ export function buildKeyRecords(
       usageFingerprint,
       alias: entry?.alias || undefined,
       aliasVersion: entry?.alias_version ?? 0,
+      allowedModels: entry?.allowed_models ?? [],
+      deniedModels: entry?.denied_models ?? [],
       usage: usageFingerprint ? usage?.[usageFingerprint] : undefined,
     };
   });

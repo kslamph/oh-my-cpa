@@ -2260,6 +2260,94 @@
         }
       }
     },
+    "/v1/management/api-keys/{index}/model-access": {
+      "put": {
+        "security": [
+          {
+            "CookieAuth": []
+          }
+        ],
+        "description": "Replace the allowed/denied model patterns of the caller API key at the given positional index. Both lists empty removes the restriction. Needs a CPA that supports access.api-key-model-access; CPA owns pattern matching.",
+        "consumes": [
+          "application/json"
+        ],
+        "produces": [
+          "application/json"
+        ],
+        "tags": [
+          "ClientKeys"
+        ],
+        "summary": "Set a client API key's model access",
+        "parameters": [
+          {
+            "type": "integer",
+            "description": "Positional key index",
+            "name": "index",
+            "in": "path",
+            "required": true
+          },
+          {
+            "description": "Model patterns",
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/api.updateClientKeyModelAccessRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "schema": {
+              "$ref": "#/definitions/api.ClientAPIKeyModelAccessResponseDTO"
+            }
+          },
+          "400": {
+            "description": "Bad Request",
+            "schema": {
+              "$ref": "#/definitions/api.ErrorResponseDTO"
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "schema": {
+              "$ref": "#/definitions/api.ErrorResponseDTO"
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "schema": {
+              "$ref": "#/definitions/api.ErrorResponseDTO"
+            }
+          },
+          "409": {
+            "description": "Conflict",
+            "schema": {
+              "$ref": "#/definitions/api.ErrorResponseDTO"
+            }
+          },
+          "500": {
+            "description": "Internal Server Error",
+            "schema": {
+              "$ref": "#/definitions/api.ErrorResponseDTO"
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "schema": {
+              "$ref": "#/definitions/api.ErrorResponseDTO"
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "schema": {
+              "$ref": "#/definitions/api.ErrorResponseDTO"
+            }
+          }
+        }
+      }
+    },
     "/v1/management/audit/events": {
       "get": {
         "security": [
@@ -13533,6 +13621,19 @@
           "description": "AliasVersion is the version a rename must cite; zero means no alias exists.",
           "type": "integer"
         },
+        "allowed_models": {
+          "description": "AllowedModels and DeniedModels are the key's model patterns in CPA's\n`access.api-key-model-access`. Both empty means the key is unrestricted. CPA owns the\nmatching rules; a gateway without the feature simply never reports any.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "fingerprint": {
           "description": "Fingerprint is the legacy keys-page identity, computed under the\n\"client-key\" purpose. It is retained so existing clients keep working.",
           "type": "string"
@@ -13564,6 +13665,32 @@
         },
         "total": {
           "type": "integer"
+        },
+        "version": {
+          "type": "integer"
+        }
+      }
+    },
+    "api.ClientAPIKeyModelAccessResponseDTO": {
+      "type": "object",
+      "properties": {
+        "allowed_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "index": {
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
         },
         "version": {
           "type": "integer"
@@ -20753,6 +20880,26 @@
         },
         "x_users_fetched": {
           "type": "integer"
+        }
+      }
+    },
+    "api.updateClientKeyModelAccessRequest": {
+      "type": "object",
+      "properties": {
+        "allowed_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expected_fingerprint": {
+          "type": "string"
         }
       }
     },
