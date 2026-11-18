@@ -23,11 +23,20 @@ import (
 
 func run(ctx context.Context) error {
 	models := flag.String("models", "", "comma-separated model names to re-price")
+	copyFrom := flag.String("copy-price-from", "", "model whose custom price (rates and time windows) is copied to -copy-price-to first")
+	copyTo := flag.String("copy-price-to", "", "comma-separated models to receive the copied price; they also join -models. Needed for names outside the current CPA catalog, which the API refuses")
 	dryRun := flag.Bool("dry-run", false, "report totals only")
 	flag.Parse()
 	var names []string
 	for _, name := range strings.Split(*models, ",") {
 		if name = strings.TrimSpace(name); name != "" {
+			names = append(names, name)
+		}
+	}
+	var targets []string
+	for _, name := range strings.Split(*copyTo, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			targets = append(targets, name)
 			names = append(names, name)
 		}
 	}
@@ -83,6 +92,29 @@ func run(ctx context.Context) error {
 	}
 	if err := report("before"); err != nil || *dryRun {
 		return err
+	}
+	if *copyFrom != "" && len(targets) > 0 {
+		rows, err := repo.ListModelPrices(ctx)
+		if err != nil {
+			return err
+		}
+		var source *repository.ModelPrice
+		for index := range rows {
+			if rows[index].Model == *copyFrom {
+				source = &rows[index]
+			}
+		}
+		if source == nil || source.Source != "manual" {
+			return fmt.Errorf("%q has no custom price to copy", *copyFrom)
+		}
+		for _, target := range targets {
+			row := *source
+			row.Model, row.Source, row.UpstreamID, row.MatchKind = target, "manual", "", ""
+			if err := repo.ApplyModelPrice(ctx, row, ""); err != nil {
+				return fmt.Errorf("price %s: %w", target, err)
+			}
+			fmt.Printf("priced   %s like %s\n", target, *copyFrom)
+		}
 	}
 	now := time.Now().UnixMilli()
 	changed, delta, err := repo.RepriceUsage(ctx, names, now)
