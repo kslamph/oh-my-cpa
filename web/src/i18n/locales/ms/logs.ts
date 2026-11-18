@@ -205,6 +205,7 @@ export default {
   "audit.action.system.database.authorization.start": "Memulakan kebenaran storan awan",
   "audit.action.system.database.authorization.complete": "Menyelesaikan kebenaran storan awan",
   "audit.action.api_key.update": "Mengemas kini kunci klien",
+  "audit.action.api_key.model_access": "Menukar akses model kunci klien",
   "audit.action.auth_file.display_name_set": "Menamakan kelayakan",
   "audit.action.auth_file.display_name_clear": "Mengosongkan nama kelayakan",
   "audit.action.cpa_credential.reveal": "Mendedahkan kunci pengurusan CPA",

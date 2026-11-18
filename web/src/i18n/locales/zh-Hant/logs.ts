@@ -205,6 +205,7 @@ export default {
   "audit.action.system.database.authorization.start": "開始雲端儲存授權",
   "audit.action.system.database.authorization.complete": "完成雲端儲存授權",
   "audit.action.api_key.update": "修改用戶端金鑰",
+  "audit.action.api_key.model_access": "修改用戶端金鑰的模型權限",
   "audit.action.auth_file.display_name_set": "設定憑證名稱",
   "audit.action.auth_file.display_name_clear": "清除憑證名稱",
   "audit.action.cpa_credential.reveal": "檢視 CPA 管理金鑰",

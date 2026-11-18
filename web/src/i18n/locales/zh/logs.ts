@@ -202,6 +202,7 @@ export default {
   "audit.action.system.database.authorization.start": "开始云存储授权",
   "audit.action.system.database.authorization.complete": "完成云存储授权",
   'audit.action.api_key.update': '修改客户端密钥',
+  'audit.action.api_key.model_access': '修改客户端密钥的模型权限',
   'audit.action.auth_file.display_name_set': '设置凭证名称',
   'audit.action.auth_file.display_name_clear': '清除凭证名称',
   'audit.action.cpa_credential.reveal': '查看 CPA 管理密钥',

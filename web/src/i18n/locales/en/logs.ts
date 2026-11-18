@@ -205,6 +205,7 @@ export default {
   "audit.action.system.database.authorization.start": "Started cloud storage authorization",
   "audit.action.system.database.authorization.complete": "Completed cloud storage authorization",
   'audit.action.api_key.update': 'Updated a client key',
+  'audit.action.api_key.model_access': 'Changed a client key\'s model access',
   'audit.action.auth_file.display_name_set': 'Named a credential',
   'audit.action.auth_file.display_name_clear': 'Cleared a credential\'s name',
   'audit.action.cpa_credential.reveal': 'Revealed the CPA management key',
