@@ -1,4 +1,3 @@
-import React from 'react';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { ApiKeysPage } from '../src/pages/ApiKeysPage';
