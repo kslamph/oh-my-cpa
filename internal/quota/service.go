@@ -484,6 +484,11 @@ func (s *Service) RefreshCredentialQuotaWith(ctx context.Context, file managemen
 
 	if fetchErr == nil {
 		result.WarmupEvidence = s.warmupEvidence
+		// Plugin credentials report to CPA's routing inside CPA's own quota fetch; the
+		// providers read here through the api-call proxy never reach it otherwise.
+		if !isPluginQuotaFile(file) {
+			s.reportObservation(ctx, stdProvider, authIndex, result.Windows)
+		}
 	}
 	EvaluateStatusAndRecommendation(result, nowMS)
 	return result, nil
