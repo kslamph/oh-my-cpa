@@ -1,0 +1,25 @@
+{
+  "why": "Reset cards a plugin lists in its summary become the plan's reset cards, soonest expiry first with an unknown expiry last; they stay out of the metric list, so they cannot crowd out the plugin's own figures. Counts the plugin reports are kept beside the list, and a malformed card key is dropped.",
+  "now_ms": 0,
+  "body": {
+    "subscription": { "plan": "coding_pro" },
+    "summary": [
+      { "key": "credits", "label": "Credits", "value": 12, "format": "number" },
+      { "key": "reset_cards_week", "label": "Weekly reset cards", "value": 3 },
+      { "key": "reset_cards_five_hour", "label": "5-hour reset cards", "value": 0 },
+      { "key": "reset_card:week:late", "label": "card", "value": 1800000000000 },
+      { "key": "reset_card:week:soon", "label": "card", "value": 1790000000000 },
+      { "key": "reset_card:week:unknown", "label": "card", "value": 0 },
+      { "key": "reset_card:month:bogus", "label": "card", "value": 1700000000000 },
+      { "key": "reset_card:week:", "label": "card", "value": 1700000000000 }
+    ],
+    "groups": [
+      {
+        "displayName": "Coding",
+        "buckets": [
+          { "window": "weekly", "remainingFraction": 0.4 }
+        ]
+      }
+    ]
+  }
+}

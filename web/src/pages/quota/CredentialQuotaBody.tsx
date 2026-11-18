@@ -288,6 +288,7 @@ export const CredentialQuotaBody: React.FC<CredentialQuotaBodyProps> = ({
       <QuotaResetCards
         credits={item.reset_credits}
         grants={item.reset_grants}
+        pluginCards={item.plan?.reset_cards}
         nowMS={nowMS}
         isDemo={isDemo}
         onRedeem={canRedeem ? () => onRedeemCredit?.(item.auth_index) : undefined}

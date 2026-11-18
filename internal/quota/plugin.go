@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -164,6 +165,16 @@ func pluginCurrencyCode(value string) string {
 	return code
 }
 
+// pluginSummaryEntry is one figure of a plugin quota response's `summary`.
+type pluginSummaryEntry struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Value    any    `json:"value"`
+	Unit     string `json:"unit"`
+	Format   string `json:"format"`
+	Currency string `json:"currency"`
+}
+
 // parsePluginQuotaPlan projects a plugin quota subscription and summary onto a
 // plan. The subscription carries display strings only (no active flag, no
 // windows), so tier stays unknown rather than guessing elite/premium from a
@@ -176,14 +187,7 @@ func parsePluginQuotaPlan(raw []byte) *QuotaPlan {
 			TierName string `json:"tierName"`
 			TierID   string `json:"tierId"`
 		} `json:"subscription"`
-		Summary []struct {
-			Key      string `json:"key"`
-			Label    string `json:"label"`
-			Value    any    `json:"value"`
-			Unit     string `json:"unit"`
-			Format   string `json:"format"`
-			Currency string `json:"currency"`
-		} `json:"summary"`
+		Summary []pluginSummaryEntry `json:"summary"`
 	}
 	if json.Unmarshal(raw, &payload) != nil {
 		return nil
@@ -196,10 +200,15 @@ func parsePluginQuotaPlan(raw []byte) *QuotaPlan {
 			}
 		}
 	}
+	resetCards := parsePluginResetCards(payload.Summary)
 	metrics := make([]QuotaMetric, 0, len(payload.Summary))
 	for _, entry := range payload.Summary {
 		if len(metrics) == maxPluginMetrics {
 			break
+		}
+		// Reset cards have their own display; as metrics they would also spend the metric budget.
+		if isPluginResetCardKey(entry.Key) {
+			continue
 		}
 		value, ok := toFloat(entry.Value)
 		if !ok || math.IsNaN(value) || math.IsInf(value, 0) {
@@ -222,12 +231,75 @@ func parsePluginQuotaPlan(raw []byte) *QuotaPlan {
 			Currency: pluginCurrencyCode(entry.Currency),
 		})
 	}
-	if label == "" && len(metrics) == 0 {
+	if label == "" && len(metrics) == 0 && resetCards == nil {
 		return nil
 	}
-	plan := &QuotaPlan{PlanType: "unknown", PlanLabel: label, Tier: "unknown"}
+	plan := &QuotaPlan{PlanType: "unknown", PlanLabel: label, Tier: "unknown", ResetCards: resetCards}
 	if len(metrics) > 0 {
 		plan.Metrics = metrics
 	}
 	return plan
+}
+
+const (
+	pluginResetCountFiveHourKey = "reset_cards_five_hour"
+	pluginResetCountWeekKey     = "reset_cards_week"
+	pluginResetCardKeyPrefix    = "reset_card:"
+	maxPluginResetCardIDRunes   = 64
+	maxPluginResetCards         = 50
+)
+
+func isPluginResetCardKey(key string) bool {
+	return key == pluginResetCountFiveHourKey || key == pluginResetCountWeekKey || strings.HasPrefix(key, pluginResetCardKeyPrefix)
+}
+
+// parsePluginResetCards reads reset-card entries from a plugin's quota summary:
+// `reset_cards_five_hour` / `reset_cards_week` (value = available count) and
+// `reset_card:<five_hour|week>:<id>` (value = expiry in epoch milliseconds, <= 0 unknown).
+// A summary without any such entry means the plugin reports no cards, which is nil.
+func parsePluginResetCards(summary []pluginSummaryEntry) *PluginResetCards {
+	var fiveHour, week *int
+	cards := make([]PluginResetCard, 0)
+	for _, entry := range summary {
+		value, ok := toFloat(entry.Value)
+		if !ok || math.IsNaN(value) || math.IsInf(value, 0) {
+			continue
+		}
+		switch {
+		case entry.Key == pluginResetCountFiveHourKey:
+			count := nonNegativeCount(value)
+			fiveHour = &count
+		case entry.Key == pluginResetCountWeekKey:
+			count := nonNegativeCount(value)
+			week = &count
+		case strings.HasPrefix(entry.Key, pluginResetCardKeyPrefix):
+			kind, id, found := strings.Cut(strings.TrimPrefix(entry.Key, pluginResetCardKeyPrefix), ":")
+			id = pluginDisplayText(id, maxPluginResetCardIDRunes)
+			if !found || id == "" || (kind != PluginResetCardFiveHour && kind != PluginResetCardWeek) || len(cards) == maxPluginResetCards {
+				continue
+			}
+			card := PluginResetCard{ID: id, Kind: kind}
+			if value > 0 {
+				expires := int64(value)
+				card.ExpiresAtMS = &expires
+			}
+			cards = append(cards, card)
+		}
+	}
+	if fiveHour == nil && week == nil && len(cards) == 0 {
+		return nil
+	}
+	// Soonest expiry first: that is the card to spend; unknown expiry goes last.
+	sort.SliceStable(cards, func(i, j int) bool {
+		a, b := cards[i].ExpiresAtMS, cards[j].ExpiresAtMS
+		if (a == nil) != (b == nil) {
+			return a != nil
+		}
+		return a != nil && *a < *b
+	})
+	return &PluginResetCards{FiveHourCount: fiveHour, WeekCount: week, Cards: cards}
+}
+
+func nonNegativeCount(value float64) int {
+	return int(math.Max(0, math.Floor(value)))
 }

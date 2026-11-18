@@ -140,6 +140,25 @@ export interface QuotaPlan {
   usage_breakdown?: QuotaUsageShare[];
   /** A plugin's quota summary, in the order it lists the figures. */
   metrics?: QuotaMetric[];
+  /** Reset cards a quota plugin reports; absent when it reports none. Display-only. */
+  reset_cards?: PluginResetCards;
+}
+
+export type PluginResetCardKind = 'five_hour' | 'week';
+
+export interface PluginResetCard {
+  id: string;
+  kind: PluginResetCardKind;
+  /** Absent when the plugin did not publish an expiry. */
+  expires_at_ms?: number;
+}
+
+export interface PluginResetCards {
+  /** The per-kind available counts the plugin reported; absent when it reported none. */
+  five_hour_count?: number;
+  week_count?: number;
+  /** The cards the plugin listed, soonest expiry first. */
+  cards: PluginResetCard[];
 }
 
 export interface QuotaCredits {

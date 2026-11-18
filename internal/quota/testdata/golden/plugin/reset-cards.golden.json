@@ -1,0 +1,46 @@
+{
+  "plan": {
+    "plan_type": "unknown",
+    "plan_label": "coding_pro",
+    "tier": "unknown",
+    "metrics": [
+      {
+        "key": "credits",
+        "label": "Credits",
+        "value": 12,
+        "format": "number"
+      }
+    ],
+    "reset_cards": {
+      "five_hour_count": 0,
+      "week_count": 3,
+      "cards": [
+        {
+          "id": "soon",
+          "kind": "week",
+          "expires_at_ms": 1790000000000
+        },
+        {
+          "id": "late",
+          "kind": "week",
+          "expires_at_ms": 1800000000000
+        },
+        {
+          "id": "unknown",
+          "kind": "week"
+        }
+      ]
+    }
+  },
+  "windows": [
+    {
+      "id": "ag_Coding_bucket_0_0",
+      "label": "Coding · 每周限制 (Weekly)",
+      "scope": "group",
+      "used_percent": 60,
+      "remaining_percent": 40,
+      "period_hours": 168,
+      "reset_accuracy": "exact"
+    }
+  ]
+}

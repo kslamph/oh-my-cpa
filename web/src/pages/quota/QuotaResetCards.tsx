@@ -3,13 +3,20 @@ import { Button } from '@/components/ui/button';
 import { useT } from '../../i18n';
 import { ThunderboltOutlined } from '../../components/icons';
 import { ConfirmAction } from '../../components/common/ConfirmAction';
-import type { ClaudeResetGrant, CodexResetCreditsInfo } from '../../types/quota';
+import type { ClaudeResetGrant, CodexResetCreditsInfo, PluginResetCardKind, PluginResetCards } from '../../types/quota';
 import { formatShortDateTime, formatTimeWithCountdown, orderCodexResetCredits } from './quotaFormat';
 import styles from './QuotaWindowCards.module.css';
+
+const PLUGIN_CARD_KINDS: readonly { kind: PluginResetCardKind; labelKey: 'quota.reset_cards_five_hour' | 'quota.reset_cards_week' }[] = [
+  { kind: 'week', labelKey: 'quota.reset_cards_week' },
+  { kind: 'five_hour', labelKey: 'quota.reset_cards_five_hour' },
+];
 
 export interface QuotaResetCardsProps {
   credits?: CodexResetCreditsInfo;
   grants?: ClaudeResetGrant[];
+  /** Reset cards a quota plugin lists (display-only: spending one is the plugin's own action). */
+  pluginCards?: PluginResetCards;
   nowMS: number;
   isDemo: boolean;
   /** Present when a credit can be spent from here. */
@@ -21,11 +28,17 @@ export interface QuotaResetCardsProps {
  * and its expiry so manual redemptions can be planned directly, and Claude's grants, which it only
  * lists.
  */
-export function QuotaResetCards({ credits, grants = [], nowMS, isDemo, onRedeem }: QuotaResetCardsProps) {
+export function QuotaResetCards({ credits, grants = [], pluginCards, nowMS, isDemo, onRedeem }: QuotaResetCardsProps) {
   const t = useT();
   const liveGrants = grants.filter((grant) => grant.resets_left > 0);
   const hasCredits = (credits?.available_count ?? 0) > 0;
-  if (!hasCredits && liveGrants.length === 0) return null;
+  const pluginGroups = PLUGIN_CARD_KINDS.map((kind) => {
+    const cards = (pluginCards?.cards ?? []).filter((card) => card.kind === kind.kind);
+    // The plugin's own count wins when it reported one; otherwise the list is the count.
+    const reported = kind.kind === 'week' ? pluginCards?.week_count : pluginCards?.five_hour_count;
+    return { ...kind, cards, count: reported ?? cards.length };
+  }).filter((group) => group.count > 0);
+  if (!hasCredits && liveGrants.length === 0 && pluginGroups.length === 0) return null;
   const creditRows = hasCredits && credits ? orderCodexResetCredits(credits.credits) : [];
   const hasApplicableNote = Boolean(
     credits && credits.applicable_available_count > 0 && credits.applicable_available_count !== credits.available_count,
@@ -92,6 +105,40 @@ export function QuotaResetCards({ credits, grants = [], nowMS, isDemo, onRedeem 
             )}
           </div>
         )}
+        {/* A plugin's reset cards: one card per kind with the count the plugin reported and each
+            card's expiry, so the soonest to lapse is the one to plan around. */}
+        {pluginGroups.map((group) => (
+          <div className={clsx(styles.card, styles['credits-card'])} key={group.kind} data-quota-reset={`plugin-${group.kind}`}>
+            <span className={styles.head}>
+              <span className={styles.name}>{t(group.labelKey)}</span>
+              <span className={styles.value}>
+                <span className={styles['value-prefix']}>{t('quota.reset_available')}</span>
+                <b>{group.count}</b>
+              </span>
+            </span>
+            {group.cards.length > 0 && (
+              <dl className={styles['credit-list']} aria-label={t(group.labelKey)}>
+                {group.cards.map((card, index) => {
+                  const hasExpiry = card.expires_at_ms != null && Number.isFinite(card.expires_at_ms) && card.expires_at_ms > 0;
+                  const isExpired = hasExpiry && card.expires_at_ms! <= nowMS;
+                  const expiryText = !hasExpiry
+                    ? '—'
+                    : isExpired
+                      ? t('quota.reset_credit_expired', { when: formatShortDateTime(card.expires_at_ms!) })
+                      : t('quota.reset_credit_expires', { when: until(card.expires_at_ms!) });
+                  return (
+                    <div className={styles['credit-row']} key={`${card.id}-${index}`} data-quota-reset-credit={card.id}>
+                      <dt className={styles['credit-label']}>{t('quota.reset_card_item', { n: index + 1 })}</dt>
+                      <dd className={styles['credit-expiry']} data-expired={isExpired ? 'true' : undefined}>
+                        {expiryText}
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
+            )}
+          </div>
+        ))}
         {/* A grant is named by the provider's own label and nothing else: what it restores is the
             provider's entitlement to state, and a guess could promise a reset it does not give. */}
         {liveGrants.map((grant) => (

@@ -239,6 +239,48 @@ describe('credential quota body details', () => {
     expect(screen.getByText('100%')).toBeTruthy();
   });
 
+  it('shows a quota plugin\'s reset cards by kind with each card\'s expiry, and nothing when it lists none', () => {
+    const { rerender } = renderBody(quota('zai-main', [], {
+      type: 'zai',
+      provider: 'zai',
+      plan: {
+        plan_type: 'unknown', plan_label: 'coding_pro', tier: 'unknown',
+        reset_cards: {
+          week_count: 2,
+          five_hour_count: 0,
+          cards: [
+            { id: 'w-1', kind: 'week', expires_at_ms: NOW_MS + 48 * HOUR_MS },
+            { id: 'w-2', kind: 'week' },
+          ],
+        },
+      },
+    }));
+    const weekly = document.querySelector<HTMLElement>('[data-quota-reset="plugin-week"]')!;
+    expect(within(weekly).getByText('Weekly reset cards')).toBeTruthy();
+    expect(weekly.textContent).toMatch(/left\s*2/);
+    const rows = Array.from(weekly.querySelectorAll<HTMLElement>('[data-quota-reset-credit]'));
+    expect(rows.map((row) => row.getAttribute('data-quota-reset-credit'))).toEqual(['w-1', 'w-2']);
+    expect(rows[1].textContent).toContain('—');
+    // A kind the plugin reports zero of draws no card.
+    expect(document.querySelector('[data-quota-reset="plugin-five_hour"]')).toBeNull();
+    // Display only: spending a plugin card is the plugin's own action.
+    expect(within(weekly).queryByRole('button')).toBeNull();
+
+    rerender(
+      <MemoryRouter>
+        <I18nProvider>
+          <CredentialQuotaBody
+            item={quota('zai-none', [], { type: 'zai', provider: 'zai', plan: { plan_type: 'unknown', plan_label: 'coding_pro', tier: 'unknown' } })}
+            credentialLabel="zai-none"
+            nowMS={NOW_MS}
+            isDemo={false}
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+    expect(document.querySelector('[data-quota-reset^="plugin-"]')).toBeNull();
+  });
+
   it('lists every Codex reset credit in expiry order instead of only the earliest one', () => {
     const onRedeem = vi.fn();
     const { rerender } = render(

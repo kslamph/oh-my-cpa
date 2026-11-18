@@ -108,6 +108,30 @@ type QuotaPlan struct {
 	// Metrics are the figures a plugin publishes beside its windows (its quota
 	// summary), in the order it lists them.
 	Metrics []QuotaMetric `json:"metrics,omitempty"`
+	// ResetCards are the reset cards a quota plugin reports (display-only: spending one
+	// is the plugin's own action). Nil when the plugin reports none.
+	ResetCards *PluginResetCards `json:"reset_cards,omitempty"`
+}
+
+// Plugin reset card kinds, as a plugin names them in its quota summary.
+const (
+	PluginResetCardFiveHour = "five_hour"
+	PluginResetCardWeek     = "week"
+)
+
+// PluginResetCard is one reset card a quota plugin lists, with the expiry it published.
+type PluginResetCard struct {
+	ID          string `json:"id"`
+	Kind        string `json:"kind"` // PluginResetCardFiveHour or PluginResetCardWeek
+	ExpiresAtMS *int64 `json:"expires_at_ms,omitempty"`
+}
+
+// PluginResetCards is a plugin's reset-card standing: the per-kind available counts the
+// plugin reported (nil when it reported none) and the cards it listed, soonest expiry first.
+type PluginResetCards struct {
+	FiveHourCount *int              `json:"five_hour_count,omitempty"`
+	WeekCount     *int              `json:"week_count,omitempty"`
+	Cards         []PluginResetCard `json:"cards"`
 }
 
 // QuotaMetric is one figure of a plugin's quota summary, such as its credit
