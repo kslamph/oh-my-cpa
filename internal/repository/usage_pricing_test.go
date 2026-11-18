@@ -445,3 +445,62 @@ func TestPriceUnpricedUsagePricesLegacyRecordsOnTheirReadbackTier(t *testing.T) 
 		t.Fatalf("legacy record priced off its readback tier: %+v %v", breakdown, err)
 	}
 }
+
+func TestRepriceUsageMovesRecordsAndEveryFactGrainTogether(t *testing.T) {
+	r := usageTestRepository(t)
+	ctx := context.Background()
+	const model = "repriced-model"
+	at := time.Now().Add(time.Minute).UnixMilli() // after the first price version, so requests lock it
+	price := func(prompt float64) {
+		t.Helper()
+		if err := r.UpsertModelPrices(ctx, []pricing.ModelPrice{{Model: model, PromptPricePer1M: prompt, PriceMultiplier: 1, Source: pricing.SourceManual}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	price(1)
+	insert := func(key string) int64 {
+		t.Helper()
+		id, err := r.InsertUsageEvents(ctx, []usage.Event{{InstanceID: "default", EventKey: key, Model: model, TimestampMS: at, InputTokens: 1_000_000}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	foldedID := insert("folded")
+	if _, err := r.AggregateUsageFacts(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	pendingID := insert("not-yet-folded")
+
+	time.Sleep(5 * time.Millisecond)
+	price(3)
+	n, delta, err := r.RepriceUsage(ctx, []string{model}, time.Now().UnixMilli())
+	if err != nil || n != 2 || delta != 4_000_000_000 {
+		t.Fatalf("repriced %d, delta %d nanos: %v", n, delta, err)
+	}
+	for _, id := range []int64{foldedID, pendingID} {
+		row, err := r.GetUsageEvent(ctx, id)
+		if err != nil || row.CostUSD == nil || *row.CostUSD != 3 {
+			t.Fatalf("row %d: %+v %v", id, row, err)
+		}
+	}
+	if _, err := r.AggregateUsageFacts(ctx, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{usageFactsFineTable, usageFactsDailyTable} {
+		var requests, priced, cost int64
+		if err := r.SQL().QueryRow(`SELECT SUM(requests), SUM(priced_requests), SUM(cost_nanos) FROM `+table+` WHERE model = ?`, model).Scan(&requests, &priced, &cost); err != nil {
+			t.Fatal(err)
+		}
+		if requests != 2 || priced != 2 || cost != 6_000_000_000 {
+			t.Fatalf("%s = %d requests, %d priced, %d nanos", table, requests, priced, cost)
+		}
+	}
+	if n, _, err := r.RepriceUsage(ctx, []string{model}, time.Now().UnixMilli()); err != nil || n != 0 {
+		t.Fatalf("second run changed %d: %v", n, err)
+	}
+	// The guard is back: an ordinary rewrite is still refused.
+	if _, err := r.SQL().Exec(`UPDATE usage_events SET cost_nanos = 0 WHERE id = ?`, foldedID); err == nil {
+		t.Fatal("the pricing guard was not restored")
+	}
+}

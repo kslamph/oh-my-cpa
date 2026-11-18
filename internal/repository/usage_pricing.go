@@ -539,6 +539,20 @@ func (r *Repository) priceUnpricedBatch(ctx context.Context, model string, atMS,
 // facts that already counted them: their cost, and one priced and one costed
 // request each. Every other measure was folded when they were recorded.
 func foldPricedCorrections(ctx context.Context, tx *sql.Tx, ids []int64) error {
+	return foldCostCorrections(ctx, tx, ids, false)
+}
+
+// foldCostCorrections folds a correction into the facts that already counted the requests. With
+// delta false the cost is the request's stored cost and each request is added as priced and
+// costed (unpriced -> priced). With delta true the requests were already priced and only their
+// cost moved: the amount added is temp._omc_reprice_delta.delta, which may be negative, and no
+// counter changes.
+func foldCostCorrections(ctx context.Context, tx *sql.Tx, ids []int64, delta bool) error {
+	costExpr, countExpr, source := "SUM(cost_nanos)", "COUNT(1)", "usage_events"
+	if delta {
+		costExpr, countExpr = "SUM(delta)", "0"
+		source = "(SELECT e.*, d.delta AS delta FROM usage_events e JOIN temp._omc_reprice_delta d ON d.id = e.id)"
+	}
 	if err := resetUsageFoldBuffer(ctx, tx); err != nil {
 		return err
 	}
@@ -547,9 +561,9 @@ func foldPricedCorrections(ctx context.Context, tx *sql.Tx, ids []int64) error {
 	for _, measure := range usageFactMeasures {
 		switch measure {
 		case "cost_nanos":
-			measures = append(measures, "SUM(cost_nanos)")
+			measures = append(measures, costExpr)
 		case "priced_requests", "costed_requests":
-			measures = append(measures, "COUNT(1)")
+			measures = append(measures, countExpr)
 		default:
 			measures = append(measures, "0")
 		}
@@ -570,7 +584,7 @@ func foldPricedCorrections(ctx context.Context, tx *sql.Tx, ids []int64) error {
 		INSERT INTO temp._omc_usage_fold_15m (instance_id, bucket_start_ms, `+usageFactDimensions+`, `+strings.Join(usageFactMeasures, ", ")+`)
 		SELECT instance_id, (timestamp_ms / ?1) * ?1, api_group_key, model, COALESCE(model_alias, ''),
 		       auth_index, provider, auth_type, `+strings.Join(measures, ", ")+`
-		FROM usage_events
+		FROM `+source+`
 		WHERE id IN (SELECT value FROM json_each(?2))
 		GROUP BY instance_id, (timestamp_ms / ?1) * ?1, api_group_key, model, COALESCE(model_alias, ''),
 		         auth_index, provider, auth_type`,
@@ -588,9 +602,9 @@ func foldPricedCorrections(ctx context.Context, tx *sql.Tx, ids []int64) error {
 	for _, measure := range usageClientFactMeasures {
 		switch measure {
 		case "cost_nanos":
-			clientMeasures = append(clientMeasures, "SUM(cost_nanos)")
+			clientMeasures = append(clientMeasures, costExpr)
 		case "priced_requests", "costed_requests":
-			clientMeasures = append(clientMeasures, "COUNT(1)")
+			clientMeasures = append(clientMeasures, countExpr)
 		default:
 			clientMeasures = append(clientMeasures, "0")
 		}
@@ -601,7 +615,7 @@ func foldPricedCorrections(ctx context.Context, tx *sql.Tx, ids []int64) error {
 		       auth_index, provider, auth_type,
 		       CASE WHEN client_agent = '' THEN 'unknown' ELSE client_agent END, client_prefix,
 		       `+strings.Join(clientMeasures, ", ")+`
-		FROM usage_events
+		FROM `+source+`
 		WHERE id IN (SELECT value FROM json_each(?2)) AND generate = 1
 		GROUP BY instance_id, (timestamp_ms / ?1) * ?1, api_group_key, model, COALESCE(model_alias, ''),
 		         auth_index, provider, auth_type,
@@ -610,4 +624,158 @@ func foldPricedCorrections(ctx context.Context, tx *sql.Tx, ids []int64) error {
 		return fmt.Errorf("stage priced client usage corrections: %w", err)
 	}
 	return foldClientUsageBuffer(ctx, tx)
+}
+
+// RepriceUsage re-prices the retained, already-priced requests of the given models at the price
+// and channel multiplier in effect at atMS, and returns how many costs changed. It is the second
+// exception to request-time locking and runs only when an operator asks, after correcting a
+// price: each request's stored cost, price version and tier are replaced, and the difference is
+// added to every fact grain in the same transaction, so totals stay equal to the sum of requests.
+// Time-of-day tiers still read the request time. Requests past retention live only in the facts
+// and keep their recorded cost. Requests whose new price cannot be resolved keep what they have.
+func (r *Repository) RepriceUsage(ctx context.Context, models []string, atMS int64) (int64, int64, error) {
+	if r == nil || r.SQL() == nil {
+		return 0, 0, errors.New("repository is not initialized")
+	}
+	var changed, deltaNanos, after int64
+	for _, model := range models {
+		after = 0
+		for {
+			n, d, last, more, err := r.repriceBatch(ctx, model, atMS, after)
+			changed += n
+			deltaNanos += d
+			if err != nil || !more {
+				if err != nil {
+					return changed, deltaNanos, err
+				}
+				break
+			}
+			after = last
+		}
+	}
+	return changed, deltaNanos, nil
+}
+
+func (r *Repository) repriceBatch(ctx context.Context, model string, atMS, after int64) (int64, int64, int64, bool, error) {
+	tx, err := r.SQL().BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, after, false, fmt.Errorf("begin repricing usage: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, model, timestamp_ms, COALESCE(provider, ''), COALESCE(executor_type, ''),
+		       COALESCE(service_tier, ''), COALESCE(effective_service_tier, ''), COALESCE(response_service_tier, ''),
+		       input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, billed_service_tier, cost_nanos
+		FROM usage_events
+		WHERE id > ?1 AND model = ?2 AND pricing_status = 'priced' AND cost_nanos IS NOT NULL
+		  AND (token_accounting IS NULL OR json_extract(token_accounting, '$.status') = 'complete')
+		ORDER BY id ASC
+		LIMIT ?3`, after, model, priceUnpricedBatch)
+	if err != nil {
+		return 0, 0, after, false, fmt.Errorf("read priced usage: %w", err)
+	}
+	type pending struct {
+		id         int64
+		event      usage.Event
+		billedTier sql.NullString
+		oldCost    int64
+	}
+	var events []pending
+	for rows.Next() {
+		var item pending
+		e := &item.event
+		if err := rows.Scan(&item.id, &e.Model, &e.TimestampMS, &e.Provider, &e.ExecutorType, &e.ServiceTier, &e.EffectiveServiceTier,
+			&e.ResponseServiceTier, &e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheCreationTokens, &item.billedTier, &item.oldCost); err != nil {
+			_ = rows.Close()
+			return 0, 0, after, false, fmt.Errorf("scan priced usage: %w", err)
+		}
+		events = append(events, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, 0, after, false, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, after, false, err
+	}
+	if len(events) == 0 {
+		return 0, 0, after, false, nil
+	}
+	last := events[len(events)-1].id
+	more := len(events) == priceUnpricedBatch
+
+	var foldedThrough int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT last_usage_event_id FROM usage_aggregation_checkpoints WHERE name = ?`, CheckpointFacts).Scan(&foldedThrough)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, after, false, fmt.Errorf("read usage fold checkpoint: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE IF NOT EXISTS _omc_reprice_delta (id INTEGER PRIMARY KEY, delta INTEGER NOT NULL)`); err != nil {
+		return 0, 0, after, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM temp._omc_reprice_delta`); err != nil {
+		return 0, 0, after, false, err
+	}
+	defer func() { _, _ = tx.ExecContext(ctx, `DELETE FROM temp._omc_reprice_delta`) }()
+
+	// The schema forbids rewriting a priced request, which is what makes recorded costs trustworthy
+	// day to day. This operator-requested correction lifts that guard for this one transaction only:
+	// SQLite DDL is transactional, so a failure restores the trigger with the rollback, and the
+	// trigger is re-created from its own stored definition before the commit.
+	var guard string
+	if err := tx.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'usage_cost_no_reprice'`).Scan(&guard); err != nil {
+		return 0, 0, after, false, fmt.Errorf("read the pricing guard: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TRIGGER usage_cost_no_reprice`); err != nil {
+		return 0, 0, after, false, fmt.Errorf("lift the pricing guard: %w", err)
+	}
+
+	book := newPriceBook(tx)
+	var changed, total int64
+	folded := make([]int64, 0, len(events))
+	for _, item := range events {
+		serviceTier := item.billedTier.String
+		if !item.billedTier.Valid {
+			serviceTier, _ = pricing.BilledServiceTier(item.event.ResponseServiceTier, item.event.ServiceTier)
+		}
+		locked, err := lockUsageCost(ctx, book, item.event, serviceTier, atMS)
+		if err != nil {
+			return 0, 0, after, false, err
+		}
+		if locked.status != "priced" || locked.cost == nil {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE usage_events
+			SET cost_nanos = ?, price_version_id = ?, channel_version_id = ?, price_tier = ?
+			WHERE id = ?`,
+			locked.cost, locked.version, locked.channelVersion, locked.tier, item.id); err != nil {
+			return 0, 0, after, false, fmt.Errorf("reprice usage: %w", err)
+		}
+		delta := *locked.cost - item.oldCost
+		if delta == 0 {
+			continue
+		}
+		changed++
+		total += delta
+		if item.id <= foldedThrough {
+			folded = append(folded, item.id)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO temp._omc_reprice_delta(id, delta) VALUES (?, ?)`, item.id, delta); err != nil {
+				return 0, 0, after, false, err
+			}
+		}
+	}
+	if len(folded) > 0 {
+		if err := foldCostCorrections(ctx, tx, folded, true); err != nil {
+			return 0, 0, after, false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, guard); err != nil {
+		return 0, 0, after, false, fmt.Errorf("restore the pricing guard: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, after, false, fmt.Errorf("commit repricing usage: %w", err)
+	}
+	return changed, total, last, more, nil
 }

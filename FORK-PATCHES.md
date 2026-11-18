@@ -74,6 +74,15 @@ They pair with our CPA fork (`~/goproj/CLIProxyAPI`, branch `custom`).
   per-key request, failure and token totals equal CPAM's on a rehearsal copy first.
 - Drop when: CPAM history is no longer wanted.
 
+## O5 - operator re-price of recorded requests (`local-only`, one-off tool)
+- `Repository.RepriceUsage` + `cmd/omc-reprice`: re-prices already-priced requests of named models at
+  the current price book, replaces cost/price version/tier, and adds the difference to the 15m,
+  daily and local-daily facts in the same transaction. The schema trigger `usage_cost_no_reprice`
+  is dropped inside each batch transaction and re-created from its stored SQL before commit.
+  Upstream deliberately never re-prices (only unpriced requests); do not expose this in the UI.
+- Run on 2026-11-18 for the deepseek models; the deployed OMC binary does not contain it (tool only).
+- Drop when: upstream gains a re-price action.
+
 ## Dependency note
 `github.com/googleapis/enterprise-certificate-proxy` is bumped v0.3.21 -> v0.3.22: upstream
 retagged v0.3.21 (3 days after release) so the module no longer matches `go.sum`. Verified
