@@ -63,6 +63,17 @@ They pair with our CPA fork (`~/goproj/CLIProxyAPI`, branch `custom`).
   `POST /plugins/:id/quota/reset`). It was never exercised live in CPAM either; decide before adding.
 - Tests: golden `internal/quota/testdata/golden/plugin/reset-cards.*`, `web/tests/credential-quota.component.test.tsx`.
 
+## O4 - CPAM history import tool (`local-only`, one-off)
+- `cmd/omc-import-cpam`: replays CPA-Manager-Plus's `usage_events` into OMC's usage inbox so OMC's
+  own pipeline decodes them (same event keys, so a replay is idempotent; same keyed client
+  identity; pricing at read time). It restores each record's client key from CPAM's `api_key_hash`
+  (CPAM stores the key redacted), attributes hashes with no current key to `-fallback-alias`,
+  rebuilds records CPAM cut down to a token total (or never kept) from CPAM's columns, and replays
+  only what precedes OMC's first live event. It takes the database lock, so OMC must be stopped.
+- Run on 2026-11-18: 89,365 records (1,322 rebuilt, 87,364 matched, 2,001 to `pws-pi`), 36 s;
+  per-key request, failure and token totals equal CPAM's on a rehearsal copy first.
+- Drop when: CPAM history is no longer wanted.
+
 ## Dependency note
 `github.com/googleapis/enterprise-certificate-proxy` is bumped v0.3.21 -> v0.3.22: upstream
 retagged v0.3.21 (3 days after release) so the module no longer matches `go.sum`. Verified
